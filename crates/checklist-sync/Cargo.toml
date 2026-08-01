@@ -1,0 +1,13 @@
+[package]
+name = "checklist-sync"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "CRDT sync seam for checklist-tui, backed by the sqlite-sync (cloudsync) extension"
+
+[dependencies]
+anyhow = "1.0.86"
+chrono = { version = "0.4.38", features = ["serde"] }
+rusqlite = { version = "0.40.0", features = ["bundled", "chrono", "uuid", "load_extension"] }
+serde = { version = "1.0.204", features = ["derive"] }
+uuid = { version = "1.10.0", features = ["v4"] }

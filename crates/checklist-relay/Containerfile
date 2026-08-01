@@ -1,0 +1,34 @@
+FROM docker.io/library/rust:1.95-bookworm AS builder
+
+ARG CLOUDSYNC_VERSION=1.1.2
+ARG CLOUDSYNC_SHA256=1aaad0a0a891a5fdae2bb95ca042a535165fd44aca2bf67cc2827285e5ed3c99
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY crates ./crates
+RUN cargo build --release -p checklist-relay
+
+ADD https://github.com/sqliteai/sqlite-sync/releases/download/${CLOUDSYNC_VERSION}/cloudsync-linux-x86_64-${CLOUDSYNC_VERSION}.tar.gz /tmp/cloudsync.tar.gz
+RUN echo "${CLOUDSYNC_SHA256}  /tmp/cloudsync.tar.gz" | sha256sum -c - \
+ && tar xzf /tmp/cloudsync.tar.gz -C /tmp \
+ && test -f /tmp/cloudsync.so
+
+FROM docker.io/library/debian:bookworm-slim
+
+# cloudsync.so links libssl/libcrypto for the vendored libcurl in its network
+# layer. That layer is never used here, but it is still a load-time dependency:
+# without these, dlopen fails and SQLite masks the real reason by retrying the
+# path with an extra ".so" suffix.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libssl3 \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin relay
+
+COPY --from=builder /build/target/release/checklist-relay /app/checklist-relay
+COPY --from=builder /tmp/cloudsync.so /app/cloudsync.so
+
+USER 10001:10001
+EXPOSE 8464
+ENTRYPOINT ["/app/checklist-relay"]

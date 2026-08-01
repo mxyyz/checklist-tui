@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/checklist-sync", "crates/checklist-relay"]
+
 [package]
 name = "checklist-tui"
 version = "0.1.6"

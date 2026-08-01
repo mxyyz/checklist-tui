@@ -1,0 +1,21 @@
+[package]
+name = "checklist-relay"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Hub for checklist-tui CRDT sync - stores the authoritative task database and merges peer deltas"
+
+[[bin]]
+name = "checklist-relay"
+path = "src/main.rs"
+
+[dependencies]
+checklist-sync = { path = "../checklist-sync" }
+anyhow = "1.0.86"
+axum = "0.8"
+rusqlite = { version = "0.40.0", features = ["bundled", "chrono", "uuid", "load_extension"] }
+serde = { version = "1.0.204", features = ["derive"] }
+serde_json = "1.0.122"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

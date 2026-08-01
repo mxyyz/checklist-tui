@@ -8,12 +8,73 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::task::Display;
 
+/// Multi-device sync settings.
+///
+/// Every field carries a default so a `config.json` written before sync existed
+/// still parses, and so does one written by a newer build with more knobs.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(default)]
+pub struct SyncConfig {
+    /// Off unless explicitly turned on. Nothing about sync runs, loads or
+    /// dials out while this is false.
+    pub enabled: bool,
+    /// Base URL of the relay, e.g. `https://checklist-sync.homelab.internal`.
+    pub endpoint: String,
+    /// File holding the bearer token. A path, never the token itself, so the
+    /// config file stays safe to read and copy around.
+    pub token_path: Option<PathBuf>,
+    /// Where the cloudsync extension lives. `None` means the config directory.
+    pub extension_path: Option<PathBuf>,
+    /// PEM bundle to trust instead of the system store. Only needed on a device
+    /// that has not installed the homelab CA root.
+    pub ca_path: Option<PathBuf>,
+    pub on_start: bool,
+    pub on_exit: bool,
+    /// Periodic sync while the TUI is open. `0` disables it.
+    pub interval_secs: u64,
+    pub timeout_secs: u64,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: String::new(),
+            token_path: None,
+            extension_path: None,
+            ca_path: None,
+            on_start: true,
+            on_exit: true,
+            interval_secs: 0,
+            timeout_secs: 15,
+        }
+    }
+}
+
+impl SyncConfig {
+    pub fn extension_path(&self) -> Result<PathBuf> {
+        match &self.extension_path {
+            Some(path) => Ok(path.clone()),
+            None => Ok(get_config_dir()?.join(checklist_sync::install::EXTENSION_FILENAME)),
+        }
+    }
+
+    pub fn token_path(&self) -> Result<PathBuf> {
+        match &self.token_path {
+            Some(path) => Ok(path.clone()),
+            None => Ok(get_config_dir()?.join("sync-token")),
+        }
+    }
+}
+
 /// Struct to hold information for the program between sessions
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
     pub db_path: PathBuf,
     pub display_filter: Display,
     pub urgency_sort_desc: bool,
+    #[serde(default)]
+    pub sync: SyncConfig,
 }
 
 impl Config {
@@ -26,6 +87,7 @@ impl Config {
             db_path,
             display_filter,
             urgency_sort_desc,
+            sync: SyncConfig::default(),
         }
     }
 

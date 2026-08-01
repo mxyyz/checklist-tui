@@ -8,7 +8,7 @@ use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
 
 use crate::backend::config::{Config, get_config_dir, read_config};
-use crate::backend::task::{Task, TaskList};
+use crate::backend::task::{Status, Task, TaskList, Urgency};
 
 /// Returns a `Result<Connection>` to an in-memory SQLite db
 pub fn make_memory_connection() -> Result<Connection> {
@@ -125,6 +125,7 @@ pub fn get_db(memory: bool, testing: bool) -> Result<Connection> {
                 config.db_path,
             )
         })?;
+        crate::backend::sync::attach(&conn, &config.sync)?;
         Ok(conn)
     }
 }
@@ -222,14 +223,16 @@ fn read_task_id(row: &Row, idx: usize) -> rusqlite::Result<Uuid> {
 
 /// Returns a `Result<TaskList>` of all tasks in a SQLite database on the `&Connection` given.
 pub fn get_all_db_contents(conn: &Connection) -> Result<TaskList> {
-    let mut stmt = conn.prepare("SELECT * FROM task").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT * FROM task")
+        .context("Failed to prepare the task query")?;
 
     let task_iter = stmt
         .query_map(params![], |row| {
             // Need separate handling for the tags
             // Basically convert string back to a vector
             let mut tags_entry = None;
-            let tags_option: Option<String> = row.get(6).unwrap();
+            let tags_option: Option<String> = row.get(6)?;
 
             if let Some(tags) = tags_option {
                 let tags_parts = tags.split(";");
@@ -242,21 +245,29 @@ pub fn get_all_db_contents(conn: &Connection) -> Result<TaskList> {
 
             Ok(Task::from_sql(
                 read_task_id(row, 0)?,
-                row.get(1).unwrap(),
-                row.get(2).unwrap(),
-                row.get(3).unwrap(),
-                row.get(4).unwrap(),
-                row.get(5).unwrap(),
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                // urgency and status are read leniently. Neither is NOT NULL in
+                // the table, and a CRDT merge can deliver a row where a column
+                // was never set by the peer that wrote it. Before sync the app
+                // was the only writer and always filled both, so a NULL here
+                // used to be unreachable; now it must not take down the TUI on
+                // startup.
+                row.get::<_, Option<Urgency>>(4)?.unwrap_or_default(),
+                row.get::<_, Option<Status>>(5)?.unwrap_or_default(),
                 tags_entry,
-                row.get(7).unwrap(),
-                row.get(8).unwrap(),
+                row.get(7)?,
+                row.get(8)?,
             ))
         })
-        .unwrap();
+        .context("Failed to read tasks from the database")?;
 
     let mut task_list = TaskList::new();
     for task in task_iter {
-        task_list.tasks.push(task.unwrap());
+        task_list
+            .tasks
+            .push(task.context("Failed to decode a task row")?);
     }
 
     Ok(task_list)

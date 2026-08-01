@@ -6,3 +6,4 @@ pub mod text;
 pub mod theme;
 pub mod tui;
 pub mod ui;
+pub mod sync_status;

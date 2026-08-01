@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::schema::SYNC_STATE_SCHEMA;
 
 const PULL_WATERMARK: &str = "pull_watermark";
+const PUSH_WATERMARK: &str = "push_watermark";
 const LAST_SYNC: &str = "last_sync";
 
 pub fn ensure_table(conn: &Connection) -> Result<()> {
@@ -50,6 +51,21 @@ pub fn pull_watermark(conn: &Connection) -> Result<i64> {
 /// early would silently skip changes.
 pub fn set_pull_watermark(conn: &Connection, watermark: i64) -> Result<()> {
     set(conn, PULL_WATERMARK, &watermark.to_string())
+}
+
+/// Highest local db version this device has successfully handed to the relay.
+///
+/// Without this the client would re-send its entire history on every sync -
+/// correct, because merges are idempotent, but O(history) per round.
+pub fn push_watermark(conn: &Connection) -> Result<i64> {
+    Ok(get(conn, PUSH_WATERMARK)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
+}
+
+/// Only ever called once the relay has accepted the batch.
+pub fn set_push_watermark(conn: &Connection, watermark: i64) -> Result<()> {
+    set(conn, PUSH_WATERMARK, &watermark.to_string())
 }
 
 pub fn last_sync(conn: &Connection) -> Result<Option<String>> {

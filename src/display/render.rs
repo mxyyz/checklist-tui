@@ -893,7 +893,18 @@ pub fn render_task_info(f: &mut Frame, app: &mut App, rectangle: Rect) {
 
 /// Renders the `Status Bar` in the TUI
 pub fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::horizontal([Constraint::Percentage(100), Constraint::Min(25)]).split(area);
+    // The sync chip only claims width when there is something to say, so a user
+    // who never enables sync sees exactly the status bar they had before.
+    let sync_label = app.sync.as_ref().map(|s| s.state.label());
+    let chunks = match &sync_label {
+        Some(label) => Layout::horizontal([
+            Constraint::Percentage(100),
+            Constraint::Min(25),
+            Constraint::Min(label.chars().count() as u16 + 2),
+        ])
+        .split(area),
+        None => Layout::horizontal([Constraint::Percentage(100), Constraint::Min(25)]).split(area),
+    };
 
     let help_blurb = if app.show_help {
         Paragraph::new(Text::from(vec![Line::from(vec![
@@ -924,6 +935,20 @@ pub fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
 
     f.render_widget(help_contents, chunks[0]);
     f.render_widget(layout_contents, chunks[1]);
+
+    if let Some(label) = sync_label {
+        use crate::display::sync_status::SyncState;
+        let styled = match app.sync.as_ref().map(|s| &s.state) {
+            Some(SyncState::Failed(_)) => label.red(),
+            Some(SyncState::Offline) => label.dark_gray(),
+            Some(SyncState::Syncing) => label.yellow(),
+            _ => label.green(),
+        };
+        let sync_contents = Paragraph::new(Text::from(vec![Line::from(vec![styled])]))
+            .block(Block::new().bg(app.theme.theme_colors.status_bar))
+            .alignment(Alignment::Right);
+        f.render_widget(sync_contents, chunks[2]);
+    }
 }
 
 /// Renders the pop-up when deleting a `Task`

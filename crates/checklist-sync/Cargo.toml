@@ -8,6 +8,9 @@ description = "CRDT sync seam for checklist-tui, backed by the sqlite-sync (clou
 [dependencies]
 anyhow = "1.0.86"
 chrono = { version = "0.4.38", features = ["serde"] }
+flate2 = "1.1.9"
 rusqlite = { version = "0.40.0", features = ["bundled", "chrono", "uuid", "load_extension"] }
 serde = { version = "1.0.204", features = ["derive"] }
+sha2 = "0.11.0"
+ureq = { version = "3.3.0", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
 uuid = { version = "1.10.0", features = ["v4"] }

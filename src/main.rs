@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use backend::import::import_database;
 use clap::{Parser, Subcommand};
 
@@ -9,6 +9,7 @@ mod display;
 
 use backend::config::{get_config_dir, read_config, set_new_path};
 use backend::database::{create_sqlite_db, get_db};
+use backend::sync;
 use backend::wipe::wipe_tasks;
 
 use display::theme::{create_empty_theme_toml, get_toml_file, read_theme};
@@ -87,6 +88,24 @@ enum Commands {
         /// Path to the database you want to import
         database: String,
     },
+
+    /// Multi-device sync
+    Sync {
+        #[command(subcommand)]
+        action: Option<SyncAction>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SyncAction {
+    /// Download and verify the cloudsync extension
+    Install,
+
+    /// Show sync configuration and state without contacting the relay
+    Status,
+
+    /// Sync with the relay now
+    Now,
 }
 
 fn main() -> Result<()> {
@@ -199,6 +218,17 @@ fn main() -> Result<()> {
 
             import_database(database, config)?;
             println!("Finished import tasks to current database.")
+        }
+
+        Some(Commands::Sync { action }) => {
+            let config = read_config(cli.test).context(
+                "Could not read the config; run `checklist init` before setting up sync",
+            )?;
+            match action.unwrap_or(SyncAction::Status) {
+                SyncAction::Install => sync::install(&config.sync)?,
+                SyncAction::Status => sync::status(&config.db_path, &config.sync)?,
+                SyncAction::Now => sync::sync_once(&config.db_path, &config.sync)?,
+            }
         }
 
         None => {

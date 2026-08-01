@@ -8,6 +8,7 @@ use ratatui::{
     widgets::ScrollbarState,
 };
 use rusqlite::Connection;
+use std::time::Duration;
 
 use crate::backend::config::Config;
 use crate::backend::database::{delete_task_in_db, get_all_db_contents, get_db};
@@ -18,6 +19,7 @@ use crate::display::render::{
     render_name_popup, render_stage_popup, render_state, render_status_bar, render_status_popup,
     render_tags_popup, render_task_info, render_tasks, render_urgency_popup,
 };
+use crate::display::sync_status::{SyncHandle, SyncState};
 use crate::display::text::TextInfo;
 use crate::display::theme::Theme;
 
@@ -34,11 +36,18 @@ pub fn run_tui(
     //let _clean_up = CleanUp;
     let mut app = App::new(memory, testing, config, theme, view)?;
     app.run()?;
+    app.sync_on_exit();
 
     restore_terminal()?;
 
     Ok(())
 }
+
+/// How long the UI waits for input before servicing the sync worker.
+const TICK: Duration = Duration::from_millis(250);
+
+/// Upper bound on how long quitting will wait for a final sync.
+const EXIT_SYNC_GRACE: Duration = Duration::from_secs(3);
 
 enum Runtime {
     Memory,
@@ -127,6 +136,8 @@ pub struct App {
     quick_action: bool,
     // Show help
     pub show_help: bool,
+    // Background sync, None when sync is disabled
+    pub sync: Option<SyncHandle>,
 }
 
 impl App {
@@ -139,6 +150,14 @@ impl App {
     ) -> Result<Self> {
         let conn = get_db(memory, testing)?;
         let tasklist = TaskList::new();
+
+        // In-memory runs have no file for a second connection to open, and
+        // nothing worth syncing anyway.
+        let sync = if memory {
+            None
+        } else {
+            SyncHandle::spawn(config.db_path.clone(), &config.sync)
+        };
 
         let runtime = if memory {
             Runtime::Memory
@@ -175,6 +194,7 @@ impl App {
             tags_filter_value: String::new(),
             quick_action: false,
             show_help: false,
+            sync,
         })
     }
 
@@ -183,15 +203,42 @@ impl App {
             Ok(()) => {}
             Err(e) => panic!("Got an error dealing with update_tasklist(): {e:?}"),
         }
+
+        if self.config.sync.on_start
+            && let Some(sync) = self.sync.as_mut()
+        {
+            sync.request();
+        }
+
         ratatui::run(|terminal| {
             while !self.should_exit {
                 terminal.draw(|f| ui(f, &mut *self))?;
-                if let Event::Key(key) = event::read()? {
+
+                // Poll rather than block, so a sync finishing in the background
+                // repaints the indicator and reloads the list without the user
+                // having to press a key first.
+                if event::poll(TICK)?
+                    && let Event::Key(key) = event::read()?
+                {
                     match self.handle_key(key) {
                         Ok(()) => {}
                         Err(e) => panic!("Got an error handling key: {key:?} - {e:?}"),
                     }
-                };
+                }
+
+                if self.sync.is_some() {
+                    let reload = {
+                        let sync = self.sync.as_mut().unwrap();
+                        sync.tick();
+                        sync.poll()
+                    };
+                    if reload
+                        && let Err(e) = self.update_tasklist()
+                    {
+                        panic!("Got an error reloading tasks after a sync: {e:?}");
+                    }
+                }
+
                 match self.runtime {
                     Runtime::Test => self.config.save(true).unwrap(),
                     Runtime::Real => self.config.save(false).unwrap(),
@@ -200,6 +247,30 @@ impl App {
             }
             Ok(())
         })
+    }
+
+    /// Sync on the way out, then wait briefly for it to land.
+    ///
+    /// Bounded on purpose: quitting must never hang because the homeserver is
+    /// asleep. If the round does not finish in time it is dropped - the changes
+    /// are already durable locally and go out on the next run.
+    fn sync_on_exit(&mut self) {
+        if !self.config.sync.on_exit {
+            return;
+        }
+        let Some(sync) = self.sync.as_mut() else {
+            return;
+        };
+
+        sync.request();
+        let deadline = std::time::Instant::now() + EXIT_SYNC_GRACE;
+        while std::time::Instant::now() < deadline {
+            sync.poll();
+            if sync.state != SyncState::Syncing {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {

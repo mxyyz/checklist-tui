@@ -103,19 +103,41 @@ pub fn chunks_for_peer(
     exclude_site_id: &str,
     since_db_version: i64,
 ) -> Result<Vec<Chunk>> {
+    chunks(conn, exclude_site_id, since_db_version, true)
+}
+
+/// Outbound deltas that originated **at** `site_id`, after `since_db_version`.
+///
+/// This is the push direction: a client sends only what it authored. Anything
+/// it merged from elsewhere came through the relay already, so re-sending it
+/// would be pure duplication.
+pub fn chunks_from_site(
+    conn: &Connection,
+    site_id: &str,
+    since_db_version: i64,
+) -> Result<Vec<Chunk>> {
+    chunks(conn, site_id, since_db_version, false)
+}
+
+fn chunks(
+    conn: &Connection,
+    site_id: &str,
+    since_db_version: i64,
+    exclude: bool,
+) -> Result<Vec<Chunk>> {
     let mut stmt = conn
         .prepare(
             "SELECT payload, chunk_index, watermark_db_version
                FROM cloudsync_payload_chunks
               WHERE site_id = cloudsync_uuid_blob(?1)
-                AND exclude_filter_site_id = 1
+                AND exclude_filter_site_id = ?3
                 AND since_db_version = ?2
               ORDER BY chunk_index",
         )
         .context("failed to prepare cloudsync_payload_chunks query")?;
 
     let rows = stmt
-        .query_map(params![exclude_site_id, since_db_version], |row| {
+        .query_map(params![site_id, since_db_version, exclude as i64], |row| {
             Ok(Chunk {
                 payload: row.get(0)?,
                 chunk_index: row.get(1)?,

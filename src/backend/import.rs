@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-use crate::backend::database::{add_to_db, get_all_db_contents, make_connection};
+use crate::backend::database::{add_to_db, get_all_db_contents, make_connection, open_app_db};
 
 use super::config::Config;
 
@@ -9,10 +9,13 @@ pub fn import_database(database_path: String, config: Config) -> Result<()> {
     // read in tasks from database to be imported
     // then add them to current database
 
+    // The source may be any checklist database, including one written by an
+    // older build, so it is opened as-is and never migrated - importing must
+    // not rewrite a file the user only pointed at.
     let new_db = PathBuf::from(database_path);
     let new_db_conn = make_connection(&new_db)?;
     let existing_db = config.db_path;
-    let existing_db_conn = make_connection(&existing_db)?;
+    let existing_db_conn = open_app_db(&existing_db)?;
 
     let new_db_tasks = get_all_db_contents(&new_db_conn)?;
     println!("Adding {} tasks to current database", new_db_tasks.len());

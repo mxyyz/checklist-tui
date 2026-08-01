@@ -310,6 +310,7 @@ name = "checklist-tui"
 version = "0.1.6"
 dependencies = [
  "anyhow",
+ "checklist-sync",
  "chrono",
  "clap",
  "color-eyre",

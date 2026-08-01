@@ -1,8 +1,11 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use anyhow::{Context, Result, bail};
+use chrono::Local;
+use rusqlite::types::ValueRef;
+use rusqlite::{Connection, Row, params};
+use uuid::Uuid;
 
 use crate::backend::config::{Config, get_config_dir, read_config};
 use crate::backend::task::{Task, TaskList};
@@ -13,29 +16,72 @@ pub fn make_memory_connection() -> Result<Connection> {
     let conn =
         Connection::open_in_memory().with_context(|| "Failed to create database in memory")?;
 
-    conn.execute(
-        "CREATE TABLE task (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            latest TEXT,
-            urgency TEXT,
-            status TEXT NOT NULL,
-            tags TEXT,
-            date_added DATE NOT NULL,
-            completed_on DATE
-        )",
-        (),
-    )?;
+    checklist_sync::migrate::migrate(&conn).context("Failed to create the task table")?;
 
     Ok(conn)
 }
 
-/// Returns a `Result<Connection>` given a `&Pathbuf` to a SQLite database
+/// Returns a `Result<Connection>` given a `&Pathbuf` to a SQLite database.
+///
+/// This is a plain open: it does not migrate. Use [`open_app_db`] for a
+/// database this program owns.
 pub fn make_connection(path: &PathBuf) -> Result<Connection> {
     let conn = Connection::open(path)
         .with_context(|| format!("Failed connect to the database at {path:?}"))?;
 
+    Ok(conn)
+}
+
+/// Copy `path` aside before a migration rewrites it.
+///
+/// Returns the backup path. Copies the `-wal` and `-shm` sidecars too when they
+/// exist, so the backup is restorable rather than merely present.
+fn backup_db_file(path: &Path) -> Result<PathBuf> {
+    let stamp = Local::now().format("%Y%m%d-%H%M%S");
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(format!(".bak-pre-sync-{stamp}"));
+    let backup = PathBuf::from(backup);
+
+    std::fs::copy(path, &backup)
+        .with_context(|| format!("Failed to back up {path:?} to {backup:?}"))?;
+
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        let sidecar = PathBuf::from(sidecar);
+        if sidecar.exists() {
+            let mut dest = backup.as_os_str().to_owned();
+            dest.push(suffix);
+            std::fs::copy(&sidecar, PathBuf::from(dest))
+                .with_context(|| format!("Failed to back up {sidecar:?}"))?;
+        }
+    }
+
+    Ok(backup)
+}
+
+/// Open a database this program owns, migrating it to the current schema.
+///
+/// The migration runs whether or not sync is enabled: the changes are column
+/// defaults and storage types, invisible to a user who never turns sync on, and
+/// keeping two schemas alive would be worse than migrating everyone once.
+pub fn open_app_db(path: &PathBuf) -> Result<Connection> {
+    let conn = make_connection(path)?;
+
+    if checklist_sync::migrate::rewrites_existing_data(&conn)
+        .context("Failed to check whether the database needs migrating")?
+    {
+        // Drop the handle so the copy cannot catch a half-written page.
+        drop(conn);
+        let backup = backup_db_file(path)?;
+        println!("Upgrading the task database; previous copy saved at {backup:?}");
+
+        let conn = make_connection(path)?;
+        checklist_sync::migrate::migrate(&conn).context("Failed to upgrade the task database")?;
+        return Ok(conn);
+    }
+
+    checklist_sync::migrate::migrate(&conn).context("Failed to prepare the task database")?;
     Ok(conn)
 }
 
@@ -57,25 +103,10 @@ pub fn create_sqlite_db(testing: bool) -> Result<()> {
     }
 
     println!("Setting up a database at {sqlite_path:?}");
-    let conn = make_connection(&sqlite_path)?;
+    let _conn = open_app_db(&sqlite_path)?;
 
     let config = Config::new(sqlite_path);
     config.save(testing)?;
-
-    conn.execute(
-        "CREATE TABLE task (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            latest TEXT,
-            urgency TEXT,
-            status TEXT NOT NULL,
-            tags TEXT,
-            date_added DATE NOT NULL,
-            completed_on DATE
-        )",
-        (),
-    )?;
 
     Ok(())
 }
@@ -88,7 +119,7 @@ pub fn get_db(memory: bool, testing: bool) -> Result<Connection> {
         Ok(conn)
     } else {
         let config = read_config(testing).context("Failed to read in config")?;
-        let conn = make_connection(&config.db_path).with_context(|| {
+        let conn = open_app_db(&config.db_path).with_context(|| {
             format!(
                 "Failed to make a connection to the database: {:?}",
                 config.db_path,
@@ -110,7 +141,7 @@ pub fn add_to_db(conn: &Connection, task: &Task) -> Result<()> {
         "INSERT INTO task (id, name, description, latest, urgency, status, tags, date_added, completed_on) 
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
-            &task.get_id(),
+            &task.get_id().to_string(),
             &task.name,
             &task.description,
             &task.latest,
@@ -144,7 +175,7 @@ pub fn update_task_in_db(conn: &Connection, task: &Task) -> Result<()> {
             tags_insert,
             &task.get_date_added(),
             &task.completed_on,
-            &task.get_id()
+            &task.get_id().to_string()
         ]
             ).context("Failed to update values for the task")?;
 
@@ -154,9 +185,39 @@ pub fn update_task_in_db(conn: &Connection, task: &Task) -> Result<()> {
 /// Deletes a `&Task` in a SQLite database based on the `&Connecton` given.
 pub fn delete_task_in_db(conn: &Connection, task: &Task) -> Result<()> {
     // println!("Deleting task from db");
-    conn.execute("DELETE FROM task WHERE id = ?1", params![&task.get_id()])
-        .context("Failed to delete task from the database")?;
+    conn.execute(
+        "DELETE FROM task WHERE id = ?1",
+        params![&task.get_id().to_string()],
+    )
+    .context("Failed to delete task from the database")?;
     Ok(())
+}
+
+/// Read a task id, accepting both storage forms.
+///
+/// Post-migration databases store canonical hyphenated text. Databases written
+/// by an older build stored a 16-byte BLOB, because rusqlite's `uuid` feature
+/// maps `Uuid` to `Value::Blob` regardless of the column being declared TEXT.
+/// `import` can be pointed at such a file, so both are accepted on read.
+fn read_task_id(row: &Row, idx: usize) -> rusqlite::Result<Uuid> {
+    let conversion_failed = |e: Box<dyn std::error::Error + Send + Sync>| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, e)
+    };
+
+    match row.get_ref(idx)? {
+        ValueRef::Text(bytes) => {
+            let text = std::str::from_utf8(bytes).map_err(|e| conversion_failed(Box::new(e)))?;
+            Uuid::parse_str(text).map_err(|e| conversion_failed(Box::new(e)))
+        }
+        ValueRef::Blob(bytes) => {
+            Uuid::from_slice(bytes).map_err(|e| conversion_failed(Box::new(e)))
+        }
+        other => Err(rusqlite::Error::InvalidColumnType(
+            idx,
+            "id".to_string(),
+            other.data_type(),
+        )),
+    }
 }
 
 /// Returns a `Result<TaskList>` of all tasks in a SQLite database on the `&Connection` given.
@@ -180,7 +241,7 @@ pub fn get_all_db_contents(conn: &Connection) -> Result<TaskList> {
             }
 
             Ok(Task::from_sql(
-                row.get(0).unwrap(),
+                read_task_id(row, 0)?,
                 row.get(1).unwrap(),
                 row.get(2).unwrap(),
                 row.get(3).unwrap(),
@@ -205,6 +266,16 @@ pub fn get_all_db_contents(conn: &Connection) -> Result<TaskList> {
 /// If `hard` is true, this will also DROP the task table.
 pub fn remove_all_db_contents(conn: &Connection, hard: bool) -> Result<()> {
     if hard {
+        // Dropping a CRDT-tracked table destroys the sync state that every
+        // other device's history is anchored to, and the divergence would only
+        // show up later as rejected merges. A soft wipe is the supported way to
+        // clear a synced database - its tombstones propagate normally.
+        if checklist_sync::cloudsync::is_enabled(conn).unwrap_or(false) {
+            bail!(
+                "refusing to drop the task table while sync is enabled.\n\
+                 Use `checklist wipe` without --hard, or disable sync first."
+            );
+        }
         conn.execute("DROP TABLE task", ())
             .context("Failed to drop the task table")?;
         println!("'task' table dropped successfully");

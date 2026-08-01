@@ -53,6 +53,18 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
+/// Whether [`migrate`] would rewrite existing user data.
+///
+/// Creating the table in an empty database is not "rewriting" - this is only
+/// true when there is a pre-sync `task` table whose rows are about to be moved,
+/// which is exactly when the caller should copy the database file aside first.
+pub fn rewrites_existing_data(conn: &Connection) -> Result<bool> {
+    if user_version(conn)? >= SCHEMA_VERSION {
+        return Ok(false);
+    }
+    table_exists(conn, "task")
+}
+
 /// Bring `conn` to [`SCHEMA_VERSION`].
 pub fn migrate(conn: &Connection) -> Result<Outcome> {
     if user_version(conn)? >= SCHEMA_VERSION {
@@ -130,6 +142,18 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute(LEGACY_SCHEMA, []).unwrap();
         conn
+    }
+
+    #[test]
+    fn rewrites_existing_data_only_when_there_is_data_to_rewrite() {
+        let empty = Connection::open_in_memory().unwrap();
+        assert!(!rewrites_existing_data(&empty).unwrap(), "empty db needs no backup");
+
+        let legacy = legacy_db();
+        assert!(rewrites_existing_data(&legacy).unwrap(), "legacy table needs a backup");
+
+        migrate(&legacy).unwrap();
+        assert!(!rewrites_existing_data(&legacy).unwrap(), "already migrated");
     }
 
     #[test]

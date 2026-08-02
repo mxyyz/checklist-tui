@@ -506,7 +506,19 @@ pub fn render_state(f: &mut Frame, app: &mut App, rectangle: Rect) {
             .border_type(BorderType::Rounded);
     }
 
-    let state_vec_lines = vec![
+    // The status-bar chip has room for "sync !" and nothing more, so the reason
+    // goes here - and at the top, because the State box is only a few lines
+    // tall and anything appended below "Sorts:" is clipped away unread.
+    let mut state_vec_lines: Vec<Line> = Vec::new();
+    if let Some(crate::display::sync_status::SyncState::Failed(why)) =
+        app.sync.as_ref().map(|s| &s.state)
+    {
+        state_vec_lines.push(Line::from("Sync error:".underlined().red()));
+        state_vec_lines.push(Line::from(why.clone().red()));
+        state_vec_lines.push(Line::from(""));
+    }
+
+    state_vec_lines.extend([
         Line::from("Filters:".underlined()),
         Line::from(vec![
             Span::styled("Status: ", Style::default()),
@@ -525,7 +537,7 @@ pub fn render_state(f: &mut Frame, app: &mut App, rectangle: Rect) {
             Span::styled("Urgency: ", Style::default()),
             urgency_sort_string,
         ]),
-    ];
+    ]);
 
     let state_text = Text::from(state_vec_lines);
     let state_paragraph = Paragraph::new(state_text)

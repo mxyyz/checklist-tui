@@ -138,6 +138,8 @@ pub struct App {
     pub show_help: bool,
     // Background sync, None when sync is disabled
     pub sync: Option<SyncHandle>,
+    // Serialized form of the config as last written, to avoid rewriting it
+    saved_config: Option<String>,
 }
 
 impl App {
@@ -195,6 +197,7 @@ impl App {
             quick_action: false,
             show_help: false,
             sync,
+            saved_config: None,
         })
     }
 
@@ -209,6 +212,8 @@ impl App {
         {
             sync.request();
         }
+
+        self.saved_config = serde_json::to_string(&self.config).ok();
 
         ratatui::run(|terminal| {
             while !self.should_exit {
@@ -239,14 +244,31 @@ impl App {
                     }
                 }
 
-                match self.runtime {
-                    Runtime::Test => self.config.save(true).unwrap(),
-                    Runtime::Real => self.config.save(false).unwrap(),
-                    _ => {}
-                }
+                // Only write when something changed. The loop now ticks four
+                // times a second instead of once per keypress, so an
+                // unconditional save here rewrites config.json continuously.
+                self.save_config_if_changed();
             }
             Ok(())
         })
+    }
+
+    /// Persist the config, but only when it differs from what is on disk.
+    fn save_config_if_changed(&mut self) {
+        let testing = match self.runtime {
+            Runtime::Test => true,
+            Runtime::Real => false,
+            Runtime::Memory => return,
+        };
+        let Ok(current) = serde_json::to_string(&self.config) else {
+            return;
+        };
+        if Some(&current) == self.saved_config.as_ref() {
+            return;
+        }
+        if self.config.save(testing).is_ok() {
+            self.saved_config = Some(current);
+        }
     }
 
     /// Sync on the way out, then wait briefly for it to land.

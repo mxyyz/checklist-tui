@@ -1,6 +1,6 @@
 use std::fs::{File, rename};
 use std::io::{BufReader, prelude::*};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
@@ -51,19 +51,38 @@ impl Default for SyncConfig {
     }
 }
 
+/// Expand a leading `~` to the user's home directory.
+///
+/// These paths are typed by hand into a JSON file, where writing `~/...` is the
+/// obvious thing to do. Nothing in Rust's `PathBuf` expands it, so without this
+/// the path is taken literally and the file is simply never found.
+pub fn expand_tilde(path: &Path) -> PathBuf {
+    let Ok(rest) = path.strip_prefix("~") else {
+        return path.to_path_buf();
+    };
+    match BaseDirs::new() {
+        Some(dirs) => dirs.home_dir().join(rest),
+        None => path.to_path_buf(),
+    }
+}
+
 impl SyncConfig {
     pub fn extension_path(&self) -> Result<PathBuf> {
         match &self.extension_path {
-            Some(path) => Ok(path.clone()),
+            Some(path) => Ok(expand_tilde(path)),
             None => Ok(get_config_dir()?.join(checklist_sync::install::EXTENSION_FILENAME)),
         }
     }
 
     pub fn token_path(&self) -> Result<PathBuf> {
         match &self.token_path {
-            Some(path) => Ok(path.clone()),
+            Some(path) => Ok(expand_tilde(path)),
             None => Ok(get_config_dir()?.join("sync-token")),
         }
+    }
+
+    pub fn ca_path(&self) -> Option<PathBuf> {
+        self.ca_path.as_deref().map(expand_tilde)
     }
 }
 

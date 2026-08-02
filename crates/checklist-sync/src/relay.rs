@@ -179,16 +179,62 @@ fn classify(err: ureq::Error) -> SyncError {
     }
 }
 
+/// Environment variable the relay reads its token from; also the key accepted
+/// when a token file turns out to be a dotenv file.
+pub const TOKEN_ENV_KEY: &str = "CHECKLIST_RELAY_TOKEN";
+
+/// Pull the token out of a file's contents.
+///
+/// Accepts three shapes, because the token is copied by hand from the relay's
+/// `.env` and every one of these is a reasonable thing to end up with:
+///
+/// * the bare token
+/// * a single `CHECKLIST_RELAY_TOKEN=...` line
+/// * a whole dotenv file containing that key among others
+///
+/// A bare token is only treated as `KEY=VALUE` when the part before `=` looks
+/// like an environment variable name, so a token that merely contains `=`
+/// (base64 padding, say) is left alone.
+fn parse_token(contents: &str) -> Option<String> {
+    for line in contents.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix(&format!("{TOKEN_ENV_KEY}=")) {
+            return Some(value.trim().trim_matches(['"', '\'']).to_string());
+        }
+    }
+
+    let single = contents.trim();
+    if single.is_empty() || single.lines().count() > 1 {
+        return None;
+    }
+    match single.split_once('=') {
+        // Environment variable names are conventionally SCREAMING_SNAKE_CASE.
+        // Requiring that is what separates a pasted `KEY=value` line from a
+        // token that merely happens to contain `=`, such as base64 padding.
+        Some((key, value))
+            if !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                && key.starts_with(|c: char| c.is_ascii_uppercase() || c == '_') =>
+        {
+            Some(value.trim().trim_matches(['"', '\'']).to_string())
+        }
+        _ => Some(single.to_string()),
+    }
+}
+
 /// Read a bearer token from a file, rejecting one that is world-readable.
 pub fn read_token(path: &PathBuf) -> anyhow::Result<String> {
-    let token = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read the sync token from {}", path.display()))?
-        .trim()
-        .to_string();
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read the sync token from {}", path.display()))?;
 
-    if token.is_empty() {
-        return Err(anyhow!("the sync token file {} is empty", path.display()));
-    }
+    let token = parse_token(&contents).filter(|t| !t.is_empty()).ok_or_else(|| {
+        anyhow!(
+            "no token found in {}; expected the token itself or a {TOKEN_ENV_KEY}= line",
+            path.display()
+        )
+    })?;
 
     #[cfg(unix)]
     {
@@ -204,4 +250,49 @@ pub fn read_token(path: &PathBuf) -> anyhow::Result<String> {
     }
 
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_token;
+
+    #[test]
+    fn accepts_a_bare_token() {
+        assert_eq!(parse_token("abc123\n").as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn accepts_a_single_env_line() {
+        assert_eq!(
+            parse_token("CHECKLIST_RELAY_TOKEN=abc123\n").as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn accepts_a_whole_dotenv_file() {
+        let env = "CHECKLIST_RELAY_DB=/data/checklist.sqlite\n\
+                   CHECKLIST_RELAY_BIND=0.0.0.0:8464\n\
+                   CHECKLIST_RELAY_TOKEN=abc123\n";
+        assert_eq!(parse_token(env).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn strips_quotes() {
+        assert_eq!(
+            parse_token("CHECKLIST_RELAY_TOKEN=\"abc123\"").as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn leaves_a_token_that_merely_contains_equals_alone() {
+        // base64 padding must not be mistaken for a KEY=VALUE line
+        assert_eq!(parse_token("c29tZXRva2Vu==").as_deref(), Some("c29tZXRva2Vu=="));
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert_eq!(parse_token("   \n  "), None);
+    }
 }

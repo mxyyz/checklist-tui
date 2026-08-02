@@ -84,7 +84,7 @@ pub fn backend(cfg: &SyncConfig) -> Result<Box<dyn SyncBackend>> {
     let relay = RelayBackend::new(
         &cfg.endpoint,
         token,
-        cfg.ca_path.as_deref(),
+        cfg.ca_path().as_deref(),
         Duration::from_secs(cfg.timeout_secs.max(1)),
     )
     .context("failed to set up the sync backend")?;

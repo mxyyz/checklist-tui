@@ -36,9 +36,14 @@ pub fn run_tui(
     //let _clean_up = CleanUp;
     let mut app = App::new(memory, testing, config, theme, view)?;
     app.run()?;
-    app.sync_on_exit();
 
+    // Restore the terminal *before* the final sync, not after. The sync can
+    // wait up to EXIT_SYNC_GRACE, and against a homeserver that is asleep it
+    // uses all of it - a host that is off does not refuse a connection, it just
+    // never answers. Waiting while still in the alternate screen leaves the
+    // last frame on display, frozen and unexplained, which reads as a hang.
     restore_terminal()?;
+    app.sync_on_exit();
 
     Ok(())
 }
@@ -48,6 +53,12 @@ const TICK: Duration = Duration::from_millis(250);
 
 /// Upper bound on how long quitting will wait for a final sync.
 const EXIT_SYNC_GRACE: Duration = Duration::from_secs(3);
+
+/// How long a final sync may run before it is worth telling the user about.
+///
+/// A reachable relay finishes in well under this, so the common case exits
+/// silently instead of flashing a message nobody can read.
+const EXIT_SYNC_ANNOUNCE_AFTER: Duration = Duration::from_millis(300);
 
 enum Runtime {
     Memory,
@@ -285,13 +296,33 @@ impl App {
         };
 
         sync.request();
-        let deadline = std::time::Instant::now() + EXIT_SYNC_GRACE;
-        while std::time::Instant::now() < deadline {
+
+        let started = std::time::Instant::now();
+        let mut announced = false;
+        while started.elapsed() < EXIT_SYNC_GRACE {
             sync.poll();
             if sync.state != SyncState::Syncing {
                 break;
             }
+            if !announced && started.elapsed() >= EXIT_SYNC_ANNOUNCE_AFTER {
+                // Only once it is slow enough to notice. The terminal is back
+                // by now, so this lands in the shell rather than over the TUI.
+                eprint!("Syncing before exit... ");
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+                announced = true;
+            }
             std::thread::sleep(Duration::from_millis(50));
+        }
+
+        if announced {
+            match &sync.state {
+                SyncState::Syncing => {
+                    eprintln!("still running, left for next time (changes are saved locally)")
+                }
+                SyncState::Offline => eprintln!("offline, changes kept locally"),
+                SyncState::Failed(why) => eprintln!("failed: {why}"),
+                _ => eprintln!("done"),
+            }
         }
     }
 
